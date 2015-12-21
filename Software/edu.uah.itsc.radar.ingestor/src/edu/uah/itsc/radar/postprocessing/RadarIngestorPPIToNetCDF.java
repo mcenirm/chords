@@ -19,17 +19,17 @@ import ucar.nc2.NetcdfFileWriter;
 import ucar.nc2.Variable;
 
 import edu.uah.itsc.radar.config.RadarConfig;
+import edu.uah.itsc.radar.services.RadarIngestorServices;
 
 public class RadarIngestorPPIToNetCDF extends Thread{
 
 	//Constants
 	//NOTE CHANGING THESE PARAMETERS CHANGES THE LEVEL OF DETAIL OF PLOT
-	private static final int latWidth = 500;			//CHANING THIS REQUIRES RECOMPUTING BOUNDS in GeoServer
-	private static final int lonWidth = 500;			//   "		"	   "		"		   "	" 	"
+	private static final float latlonResolution = 0.001f;
+	private static final float coverageAngle = 1.5f;
 	private static final float roundConst = 1000.0f;
-	private static final int angleCount = 15;			
-	private static final int rangeCount = 15;
-	private static final float coverageArea = 980 * 150000;		// Range to be covered (Radius) = (# of Gates * GateWidth) 
+	private static final int angleCount = 10;			
+	private static final int rangeCount = 10;
 
 	//IO variables
 	private String fileName, outputFileName;
@@ -67,20 +67,17 @@ public class RadarIngestorPPIToNetCDF extends Thread{
 		}
 
 		//Determine the coverage range for this data
-		//float angle = 0.5f;
-		float angle = (float) Math.toDegrees(coverageArea /  RadarConfig.RADIUS_OF_EARTH);
-		float minLat = this.radarLat - angle;
-		float maxLat = this.radarLat + angle;
-		float minLon = this.radarLon - angle;
-		float maxLon = this.radarLon + angle;
+		float minLat = this.radarLat - coverageAngle;
+		float maxLat = this.radarLat + coverageAngle;
+		float minLon = this.radarLon - coverageAngle;
+		float maxLon = this.radarLon + coverageAngle;
 
 		//Detemine the values for lat and lon axis
-		float steppingSize, temp;
+		float temp;
 
 		//Generate all the latitudes
 		lats = new Vector<Float>();
-		steppingSize = (maxLat - minLat) / latWidth;
-		for(float lat = minLat; lat <= maxLat; lat += steppingSize) {
+		for(float lat = minLat; lat <= maxLat; lat += latlonResolution) {
 			temp = Math.round(lat * roundConst) / roundConst;
 			if(!lats.contains(temp))
 				lats.add(temp);
@@ -88,14 +85,14 @@ public class RadarIngestorPPIToNetCDF extends Thread{
 
 		//Generate all the longitudes
 		lons = new Vector<Float>();
-		steppingSize = (maxLon - minLon) / lonWidth;
-		for(float lon = minLon; lon <= maxLon; lon += steppingSize){
+		for(float lon = maxLon; lon >= minLon; lon -= latlonResolution){
 			temp = Math.round(lon * roundConst) / roundConst;
 			if(!lons.contains(temp)) 
 				lons.add(temp);
 		}
 	}
 
+	@SuppressWarnings("deprecation")
 	@Override
 	public void run(){
 		System.out.println("Converting '" + this.fileName + "' to NetCDF...");
@@ -130,7 +127,7 @@ public class RadarIngestorPPIToNetCDF extends Thread{
 
 			//Variable that we want to plot... in this case its Reflectivity
 			Variable temp = writer.addVariable(null, "reflectivity", DataType.FLOAT, dims);
-			temp.addAttribute(new Attribute("standard_name","reflectivity"));
+			temp.addAttribute(new Attribute("standard_name","equivalent_reflectivity_factor"));
 			temp.addAttribute(new Attribute("units","dBZ"));
 
 			//global CF metadata
@@ -174,7 +171,6 @@ public class RadarIngestorPPIToNetCDF extends Thread{
 					d.setFloat(im.set(i,j), Float.NaN);
 
 			//Reflectivity data
-			int count = 0;
 			String data = null;
 			String s[] = null;
 			float startAz, endAz, startRange, endRange, value;
@@ -183,19 +179,19 @@ public class RadarIngestorPPIToNetCDF extends Thread{
 			float rangeResolution;
 
 			while((data = dis.readLine()) != null && data.length() > 0){
-				
-				s = data.split(",");
 
+				s = data.split(",");
 				if(s.length < 5) continue; //Skip if line is not of correct length
 
 				//Parse the parameters
+				value = Float.parseFloat(s[4]);
+				if(value < -10.0f) continue;			//Ignore noise
+
 				startAz = Float.parseFloat(s[0]);
 				endAz = Float.parseFloat(s[1]);
 				startRange = Float.parseFloat(s[2]);
 				endRange = Float.parseFloat(s[3]);
-				value = Float.parseFloat(s[4]);
-				
-				if(value < -32.0f) continue; //Ignore noise
+
 
 				//Skip in case of equal values
 				if(startRange == endRange || endAz == startAz) continue;
@@ -206,22 +202,21 @@ public class RadarIngestorPPIToNetCDF extends Thread{
 				for(float _range = startRange; _range <= endRange; _range += rangeResolution){
 					for(float _angle = startAz; _angle <= endAz; _angle += angleResolution){
 
-						//Latitude
-						_lat = (float) (_range * Math.sin( Math.toRadians(_angle)));
+						_lat = (float) (_range * Math.sin(Math.toRadians(90 - _angle)));
+						_lon = (float) (_range * Math.cos(Math.toRadians(90 - _angle)));
+						
 						_lat = (float) (radarLat + Math.toDegrees(_lat / RadarConfig.RADIUS_OF_EARTH));
 						_lat = Math.round(_lat * roundConst) / roundConst;
-
-						//Longitude
-						_lon = (float) (_range * Math.cos( Math.toRadians(_angle)));
+						
 						_lon = (float) (radarLon + Math.toDegrees(_lon / RadarConfig.RADIUS_OF_EARTH));
 						_lon = Math.round(_lon * roundConst) / roundConst;
-
+												
 						//Determine x and y axis index for this value
 						i = lats.indexOf(_lat);
 						j = lons.indexOf(_lon);
 
 						//If index values are valid push it to array
-						if( i >= 0 && j >=0 ){
+						if( i >= 0 && j >=0){
 							d.setFloat(im.set(i,j), value);
 						}
 					}
@@ -242,8 +237,11 @@ public class RadarIngestorPPIToNetCDF extends Thread{
 			e.printStackTrace();
 		}
 		System.out.println("Created '" + this.outputFileName + "' file!");
-		//		if(this.dataFile.delete()){
-		//			System.out.println("Deleted " + this.fileName + "!");
-		//		}
+
+		//Publish newly generated NetCDF
+		RadarIngestorServices.publishNetCDF(this.outputFileName);
+
+		//Make file for deletions
+		(new File(this.fileName)).delete();
 	}
 }
